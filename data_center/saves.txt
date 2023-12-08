@@ -1,0 +1,147 @@
+#include <HardwareSerial.h>
+#include <WiFi.h>
+#include <camera_tracking_inferencing.h>
+#include "esp32.h"
+#include "esp32cam/tinyml/edgeimpulse/FOMO.h"
+
+HardwareSerial SerialPort(0);
+
+#define SERVER_PORT 4080
+
+const char* ssid = "OneGhost";
+const char* password = "20001001";
+
+WiFiServer TCPserver(SERVER_PORT);
+
+void setup()
+{
+  Serial.begin(115200);
+  Serial.print("setting up");
+  SerialPort.begin(115200, SERIAL_8N1, 43, 44);
+
+  // Connect to Wi-Fi
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(1000);
+    Serial.println("Connecting to WiFi...");
+  }
+  Serial.println("Connected to WiFi");
+
+  TCPserver.begin();
+}
+
+void loop() {
+  // Wait for a TCP client from ESP32 #1:
+  WiFiClient client = TCPserver.available();
+  
+  if (client) {
+    // check for the object from camera
+    Serial.println("Client connected");
+    String camera_label;
+    float camera_x = 0.0;
+    float camera_y = 0.0;
+    float camera_width = 0.0;
+    float camera_height = 0.0;
+    float dt = 0.0;
+    if (fomo.hasObjects()) {
+      // print information from camera first
+      fomo.forEach([&client, &camera_label, &camera_x, &camera_y, &camera_width, &camera_height, &dt](size_t ix, ei_impulse_result_bounding_box_t bbox) {
+        camera_label = bbox.label;
+        camera_x = bbox.x;
+        camera_y = bbox.y;
+        camera_width = bbox.width;
+        camera_height = bbox.height;
+        Serial.print(" > info from Camera: ");
+        Serial.print(bbox.label);
+        Serial.print(" at (");
+        Serial.print(bbox.x);
+        Serial.print(", ");
+        Serial.print(bbox.y);
+        Serial.print("), size ");
+        Serial.print(bbox.width);
+        Serial.print(" x ");
+        Serial.print(bbox.height);
+        Serial.println();
+        // data from accelerometer
+        int counter = 15;
+        while (client.connected() && counter > 0) {
+          if (client.available()) {
+            
+            String message = client.readStringUntil('\n'); // Read the message until end character
+            int firstCommaIndex = message.indexOf(',');
+            int secondCommaIndex = message.indexOf(',', firstCommaIndex + 1);
+            String accxStr = message.substring(0, firstCommaIndex);
+            String accyStr = message.substring(firstCommaIndex + 1, secondCommaIndex);
+            String dtimeStr = message.substring(secondCommaIndex + 1);
+            // Convert to float or integer
+            float accx = accxStr.toFloat();
+            float accy = accyStr.toFloat();
+            long dtime = dtimeStr.toInt();
+            if (dt == 0.0) {
+              dt = dtime;
+              continue;
+            }
+            float acc_dt = dtime - dt;
+            dt = dtime;
+            // calculate the offset from accelerometer data
+            float offset_x = accx * acc_dt + 0.5 * accx * acc_dt * acc_dt;
+            float offset_y = accy * acc_dt + 0.5 * accy * acc_dt * acc_dt;
+            float new_x = camera_x + offset_x;
+            float new_y = camera_y + offset_y;
+            Serial.print(" < info from Accelerometer: ");
+            Serial.print(camera_label);
+            Serial.print(" at (");
+            Serial.print(new_x);
+            Serial.print(", ");
+            Serial.print(new_y);
+            Serial.print("), size ");
+            Serial.print(camera_width);
+            Serial.print(" x ");
+            Serial.print(camera_height);
+            Serial.println();
+            counter--;
+          }
+        }
+      });
+    }
+    else {
+        Serial.println("No objects detected");
+    }
+  } 
+  // when not receiving info from accelerometer
+  else {
+    if (!cam.capture()) {
+        Serial.println(cam.getErrorMessage());
+        delay(1000);
+        return;
+    }
+    // run FOMO model
+    if (!fomo.detectObjects(cam)) {
+        Serial.println(fomo.getErrorMessage());
+        delay(1000);
+        return;
+    }
+    // print found bounding boxes
+    if (fomo.hasObjects()) {
+        Serial.printf("Found %d objects in %d millis\n", fomo.count(), fomo.getExecutionTimeInMillis());
+
+        fomo.forEach([](size_t ix, ei_impulse_result_bounding_box_t bbox) {
+            Serial.print(" > Info from Camera: ");
+            Serial.print(bbox.label);
+            Serial.print(" at (");
+            Serial.print(bbox.x);
+            Serial.print(", ");
+            Serial.print(bbox.y);
+            Serial.print("), size ");
+            Serial.print(bbox.width);
+            Serial.print(" x ");
+            Serial.print(bbox.height);
+            Serial.println();
+        });
+    }
+    else {
+        Serial.println("No objects detected");
+    }
+  }
+}
+
